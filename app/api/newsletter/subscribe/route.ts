@@ -4,7 +4,9 @@ import { ok, err, withErrorHandler } from '@/src/lib/api'
 import { generateToken } from '@/src/lib/tokens'
 import { Resend } from 'resend'
 
-const resend = new Resend(process.env.RESEND_API_KEY)
+function getResend() {
+  return new Resend(process.env.RESEND_API_KEY)
+}
 
 const SubscribeSchema = z.object({
   email:      z.string().email(),
@@ -50,7 +52,7 @@ export const POST = withErrorHandler(async (req) => {
   const token      = generateToken(input.email, 'confirm')
   const confirmUrl = `${process.env.NEXT_PUBLIC_BASE_URL}/api/newsletter/confirm?token=${token}`
 
-  await resend.emails.send({
+  await getResend().emails.send({
     from: process.env.EMAIL_FROM!,
     to:   input.email,
     subject: 'Confirmez votre inscription aux alertes deals',
