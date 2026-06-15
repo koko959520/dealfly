@@ -3,7 +3,7 @@ import { fr } from 'date-fns/locale'
 import { db, Collections, fromTS, type DealDoc } from '@/src/lib/firestore'
 import { Timestamp } from 'firebase-admin/firestore'
 
-export const revalidate = 300
+export const dynamic = 'force-dynamic'
 
 type DealRow = {
   id: string

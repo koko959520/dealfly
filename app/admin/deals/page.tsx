@@ -6,7 +6,7 @@ import { fr } from 'date-fns/locale'
 import { db, Collections, fromTS, type DealDoc } from '@/src/lib/firestore'
 import DealActions from './DealActions'
 
-export const revalidate = 0
+export const dynamic = 'force-dynamic'
 
 async function getDeals() {
   const snap = await db

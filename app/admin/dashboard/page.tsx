@@ -5,7 +5,7 @@ import { format } from 'date-fns'
 import { fr } from 'date-fns/locale'
 import { db, Collections, fromTS, type NewsletterSendDoc } from '@/src/lib/firestore'
 
-export const revalidate = 60
+export const dynamic = 'force-dynamic'
 
 async function getStats() {
   const [pendingSnap, approvedSnap, sentSnap, subsSnap, lastSendSnap] = await Promise.all([
