@@ -6,7 +6,9 @@ import { generateToken } from '@/src/lib/tokens'
 import { curateDeals } from './deal-curator'
 import NewsletterEmail from '@/emails/newsletter'
 
-const resend  = new Resend(process.env.RESEND_API_KEY)
+function getResend() {
+  return new Resend(process.env.RESEND_API_KEY)
+}
 const BATCH   = 100
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000'
 
@@ -35,7 +37,7 @@ export async function sendNewsletter(): Promise<{ sent: number; dealIds: string[
       try {
         const unsubUrl = `${BASE_URL}/api/newsletter/unsubscribe?token=${generateToken(email, 'unsub')}`
         const html     = render(NewsletterEmail({ deals, unsubscribeUrl: unsubUrl, baseUrl: BASE_URL }))
-        await resend.emails.send({
+        await getResend().emails.send({
           from: process.env.EMAIL_FROM!,
           to: email,
           subject: `✈️ ${deals.length} deals — jusqu'à -${Math.max(...deals.map((d) => Math.round(d.discountPct)))}%`,
