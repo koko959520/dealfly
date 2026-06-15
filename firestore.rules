@@ -1,0 +1,33 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Lecture publique des deals approuvés/envoyés ──────────────────────────
+    match /deals/{dealId} {
+      allow read: if resource.data.status in ['APPROVED', 'SENT'];
+      allow write: if false; // Écriture uniquement via Firebase Admin SDK (backend)
+    }
+
+    // ── Vols — lecture publique ───────────────────────────────────────────────
+    match /flights/{flightId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ── Historique des prix — lecture publique ────────────────────────────────
+    match /price_history/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ── Abonnés — pas d'accès client direct (géré via API routes) ────────────
+    match /subscribers/{subId} {
+      allow read, write: if false;
+    }
+
+    // ── Envois newsletter — pas d'accès client direct ─────────────────────────
+    match /newsletter_sends/{sendId} {
+      allow read, write: if false;
+    }
+  }
+}

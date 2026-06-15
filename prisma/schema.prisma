@@ -1,0 +1,95 @@
+// ──────────────────────────────────────────────────────────────────────────────
+// Prisma Schema — Travel Deal Platform
+// ──────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Prix bruts collectés (append-only, jamais de UPDATE)
+model Flight {
+  id            String    @id @default(uuid()) @db.Uuid
+  origin        String    @db.Char(3)        // IATA ex: CDG
+  destination   String    @db.Char(3)
+  departureDate DateTime  @map("departure_date") @db.Date
+  returnDate    DateTime? @map("return_date") @db.Date  // NULL si aller simple
+  priceEur      Decimal   @map("price_eur") @db.Decimal(8, 2)
+  airline       String?   @db.VarChar(100)
+  source        String    @db.VarChar(50)    // 'amadeus' | 'kiwi' | 'skyscanner' | 'scraper'
+  scrapedAt     DateTime  @default(now()) @map("scraped_at") @db.Timestamptz()
+
+  deals Deal[]
+
+  @@index([origin, destination, departureDate])
+  @@map("flights")
+}
+
+// Médiane 30j par route (mise à jour quotidienne)
+model PriceHistory {
+  route        String  @db.VarChar(7)      // ex: CDG-JFK
+  date         DateTime @db.Date
+  medianPrice  Decimal? @map("median_price") @db.Decimal(8, 2)
+  minPrice     Decimal? @map("min_price") @db.Decimal(8, 2)
+  sampleCount  Int?     @map("sample_count")
+
+  @@id([route, date])
+  @@map("price_history")
+}
+
+// Deals détectés par le moteur
+model Deal {
+  id             String    @id @default(uuid()) @db.Uuid
+  flightId       String    @map("flight_id") @db.Uuid
+  route          String?   @db.VarChar(7)
+  discountPct    Decimal   @map("discount_pct") @db.Decimal(5, 2)
+  score          Int       // 0–100
+  optimalDepart  DateTime? @map("optimal_depart") @db.Date
+  optimalReturn  DateTime? @map("optimal_return") @db.Date
+  status         DealStatus @default(PENDING)
+  detectedAt     DateTime  @default(now()) @map("detected_at") @db.Timestamptz()
+  expiresAt      DateTime? @map("expires_at") @db.Timestamptz()
+
+  flight Flight @relation(fields: [flightId], references: [id])
+
+  @@index([status, score(sort: Desc)])
+  @@map("deals")
+}
+
+enum DealStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SENT
+  EXPIRED
+}
+
+// Abonnés newsletter
+model Subscriber {
+  id              String    @id @default(uuid()) @db.Uuid
+  email           String    @unique @db.VarChar(255)
+  originAirport   String    @default("CDG") @map("origin_airport") @db.Char(3)
+  budgetMaxEur    Int?      @map("budget_max_eur")
+  confirmed       Boolean   @default(false)
+  active          Boolean   @default(true)
+  subscribedAt    DateTime  @default(now()) @map("subscribed_at") @db.Timestamptz()
+  unsubscribedAt  DateTime? @map("unsubscribed_at") @db.Timestamptz()
+
+  @@map("subscribers")
+}
+
+// Historique des envois newsletter
+model NewsletterSend {
+  id             String    @id @default(uuid()) @db.Uuid
+  dealIds        String[]  @map("deal_ids") @db.Uuid
+  sentAt         DateTime  @default(now()) @map("sent_at") @db.Timestamptz()
+  recipientCount Int       @map("recipient_count")
+  openRate       Decimal?  @map("open_rate") @db.Decimal(5, 2)
+  clickRate      Decimal?  @map("click_rate") @db.Decimal(5, 2)
+
+  @@map("newsletter_sends")
+}

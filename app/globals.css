@@ -1,0 +1,22 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+  }
+
+  body {
+    @apply bg-white text-gray-900 antialiased;
+  }
+}
+
+@layer utilities {
+  .price-hot    { @apply bg-green-600 text-white; }
+  .price-warm   { @apply bg-lime-500 text-white; }
+  .price-normal { @apply bg-amber-400 text-gray-900; }
+  .price-cold   { @apply bg-red-500 text-white; }
+  .price-empty  { @apply bg-gray-100 text-gray-400; }
+}
