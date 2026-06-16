@@ -22,8 +22,9 @@ export function withErrorHandler(
       if (error instanceof ZodError) {
         return err(error.errors.map((e) => e.message).join(', '), 400)
       }
+      const msg = error instanceof Error ? error.message : String(error)
       console.error('[API Error]', error)
-      return err('Internal server error', 500)
+      return err(msg, 500)
     }
   }
 }
