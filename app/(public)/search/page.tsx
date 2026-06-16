@@ -79,13 +79,6 @@ function durationToMinutes(dur: string): number {
   return h * 60 + m
 }
 
-function googleFlightsUrl(origin: string, destination: string, departDate: string, returnDate?: string) {
-  const base = `https://www.google.com/travel/flights/search?tfs=CBwQAhopagcIARIDCgFAAhIkCgoyMDI1LTAzLTI1EgNDREcaBgoDQ0RHIAJaAUo&hl=fr`
-  const dep = departDate.replace(/-/g, '')
-  const ret = returnDate ? returnDate.replace(/-/g, '') : ''
-  return `https://www.google.com/travel/flights?q=vols+${origin}+${destination}+${dep}${ret ? '+'+ret : ''}&hl=fr&curr=EUR`
-}
-
 function stopsLabel(stops: number) {
   if (stops === 0) return { text: 'Direct', cls: 'bg-green-100 text-green-700' }
   if (stops === 1) return { text: '1 escale', cls: 'bg-yellow-100 text-yellow-700' }
@@ -136,15 +129,10 @@ function ItineraryBlock({ itin, label }: { itin: Itinerary; label: string }) {
   )
 }
 
-function FlightCard({ flight, returnDate }: { flight: FlightResult; returnDate: string }) {
+function FlightCard({ flight }: { flight: FlightResult }) {
   const [open, setOpen] = useState(false)
   const airline = airlineName(flight.airline)
-  const bookUrl = googleFlightsUrl(
-    flight.outbound.segments[0].from,
-    flight.outbound.segments[flight.outbound.segments.length - 1].to,
-    flight.outbound.segments[0].departure.split('T')[0],
-    flight.inbound ? flight.inbound.segments[0].departure.split('T')[0] : undefined,
-  )
+  const bookUrl = flight.deepLink
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl shadow-sm hover:shadow-md transition-shadow">
@@ -504,7 +492,7 @@ export default function SearchPage() {
             ) : (
               <div className="space-y-3">
                 {filtered.map((flight) => (
-                  <FlightCard key={flight.id} flight={flight} returnDate={returnDate} />
+                  <FlightCard key={flight.id} flight={flight} />
                 ))}
               </div>
             )}
