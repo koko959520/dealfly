@@ -77,6 +77,10 @@ interface AmadeusOffer {
 }
 
 export const GET = withErrorHandler(async (req) => {
+  if (!process.env.AMADEUS_API_KEY || !process.env.AMADEUS_API_SECRET) {
+    return err('AMADEUS_API_KEY / AMADEUS_API_SECRET non configurés', 503)
+  }
+
   const params = getParams(req)
   const input  = Schema.parse({
     origin:        params.get('origin'),
@@ -87,8 +91,8 @@ export const GET = withErrorHandler(async (req) => {
   })
 
   const client = new Amadeus({
-    clientId:     process.env.AMADEUS_API_KEY!,
-    clientSecret: process.env.AMADEUS_API_SECRET!,
+    clientId:     process.env.AMADEUS_API_KEY,
+    clientSecret: process.env.AMADEUS_API_SECRET,
   })
 
   const query: Record<string, string | number | boolean> = {
