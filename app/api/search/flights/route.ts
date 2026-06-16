@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import axios from 'axios'
-import { format } from 'date-fns'
+import { addDays, format } from 'date-fns'
 import { ok, err, withErrorHandler, getParams } from '@/src/lib/api'
+import { db, Collections, toTS, type FlightDoc } from '@/src/lib/firestore'
 
 const Schema = z.object({
   origin:        z.string().length(3).toUpperCase(),
@@ -15,8 +15,8 @@ export interface FlightResult {
   id:       string
   price:    number
   currency: string
-  seats:    number | null
   airline:  string
+  source:   string
   outbound: Itinerary
   inbound:  Itinerary | null
   deepLink: string
@@ -38,68 +38,32 @@ export interface Segment {
   duration:  string
 }
 
-// ── Types Kiwi API ────────────────────────────────────────────────────────────
+function buildItinerary(flight: FlightDoc, isReturn: boolean): Itinerary {
+  // Les données Firestore ne stockent pas les segments détaillés —
+  // on construit un segment unique depuis les champs disponibles
+  const depDate = isReturn && flight.returnDate
+    ? format(flight.returnDate.toDate(), "yyyy-MM-dd'T'HH:mm:ss")
+    : format(flight.departureDate.toDate(), "yyyy-MM-dd'T'HH:mm:ss")
 
-interface KiwiRoute {
-  id:           string
-  flyFrom:      string
-  flyTo:        string
-  airline:      string
-  flight_no:    number
-  operating_carrier: string
-  dTime:        number  // unix timestamp
-  aTime:        number
-  return:       0 | 1
-}
+  const from = isReturn ? flight.destination : flight.origin
+  const to   = isReturn ? flight.origin      : flight.destination
 
-interface KiwiFlight {
-  id:           string
-  price:        number
-  availability: { seats: number | null }
-  airlines:     string[]
-  deep_link:    string
-  utc_departure: string
-  utc_arrival:   string
-  duration:      { departure: number; return: number; total: number }
-  route:         KiwiRoute[]
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function secsToHm(secs: number): string {
-  const h = Math.floor(secs / 3600)
-  const m = Math.floor((secs % 3600) / 60)
-  return m > 0 ? `${h}h${m}m` : `${h}h`
-}
-
-function toISO(unix: number): string {
-  return new Date(unix * 1000).toISOString()
-}
-
-function buildItinerary(routes: KiwiRoute[], dir: 0 | 1, durationSecs: number): Itinerary {
-  const legs = routes.filter((r) => r.return === dir)
   return {
-    duration: secsToHm(durationSecs),
-    stops:    Math.max(0, legs.length - 1),
-    segments: legs.map((r) => ({
-      airline:   r.airline,
-      flightNum: String(r.flight_no),
-      from:      r.flyFrom,
-      to:        r.flyTo,
-      departure: toISO(r.dTime),
-      arrival:   toISO(r.aTime),
-      duration:  secsToHm(r.aTime - r.dTime),
-    })),
+    duration: '—',
+    stops:    0,
+    segments: [{
+      airline:   flight.airline ?? '?',
+      flightNum: '',
+      from,
+      to,
+      departure: depDate,
+      arrival:   depDate,
+      duration:  '—',
+    }],
   }
 }
-
-// ── Handler ───────────────────────────────────────────────────────────────────
 
 export const GET = withErrorHandler(async (req) => {
-  if (!process.env.KIWI_API_KEY) {
-    return err('KIWI_API_KEY non configuré', 503)
-  }
-
   const params = getParams(req)
   const input  = Schema.parse({
     origin:        params.get('origin'),
@@ -109,54 +73,54 @@ export const GET = withErrorHandler(async (req) => {
     adults:        params.get('adults') ?? '1',
   })
 
-  // Kiwi date format: dd/MM/yyyy
-  const depFormatted = format(new Date(input.departureDate), 'dd/MM/yyyy')
+  // Fenêtre ±2 jours autour de la date demandée
+  const depDate  = new Date(input.departureDate)
+  const depStart = addDays(depDate, -2)
+  const depEnd   = addDays(depDate, 2)
 
-  const query: Record<string, string | number> = {
-    fly_from:    input.origin,
-    fly_to:      input.destination,
-    date_from:   depFormatted,
-    date_to:     depFormatted,
-    adults:      input.adults,
-    curr:        'EUR',
-    limit:       20,
-    sort:        'price',
-    locale:      'fr',
+  const snap = await db
+    .collection(Collections.FLIGHTS)
+    .where('origin',        '==', input.origin)
+    .where('destination',   '==', input.destination)
+    .where('departureDate', '>=', toTS(depStart))
+    .where('departureDate', '<=', toTS(depEnd))
+    .orderBy('departureDate')
+    .orderBy('priceEur')
+    .limit(50)
+    .get()
+
+  if (snap.empty) {
+    return ok({
+      flights: [],
+      total:   0,
+      message: 'Aucun vol en base pour cette route et cette date. Le scraper collecte des données toutes les 6h.',
+    })
   }
 
-  if (input.returnDate) {
-    const retFormatted = format(new Date(input.returnDate), 'dd/MM/yyyy')
-    query.return_from = retFormatted
-    query.return_to   = retFormatted
-    // durée min/max en nuits estimée
-    const dep = new Date(input.departureDate)
-    const ret = new Date(input.returnDate)
-    const nights = Math.round((ret.getTime() - dep.getTime()) / 86400000)
-    query.nights_in_dst_from = Math.max(1, nights - 2)
-    query.nights_in_dst_to   = nights + 2
-  }
+  // Dédupliquer par (date + prix + compagnie) et ajuster par nb passagers
+  const seen = new Set<string>()
+  const flights: FlightResult[] = []
 
-  const response = await axios.get('https://api.tequila.kiwi.com/v2/search', {
-    headers: { apikey: process.env.KIWI_API_KEY },
-    params:  query,
-    timeout: 15000,
-  })
+  for (const doc of snap.docs) {
+    const f   = doc.data() as FlightDoc
+    const key = `${f.departureDate.toDate().toDateString()}-${f.priceEur}-${f.airline}`
+    if (seen.has(key)) continue
+    seen.add(key)
 
-  const raw: KiwiFlight[] = response.data?.data ?? []
+    const unitPrice = Math.round(f.priceEur * input.adults)
+    const hasReturn = !!f.returnDate && !!input.returnDate
 
-  const flights: FlightResult[] = raw.map((f) => {
-    const hasReturn = f.route.some((r) => r.return === 1)
-    return {
-      id:       f.id,
-      price:    Math.round(f.price),
+    flights.push({
+      id:       doc.id,
+      price:    unitPrice,
       currency: 'EUR',
-      seats:    f.availability?.seats ?? null,
-      airline:  f.airlines?.[0] ?? f.route[0]?.airline ?? '?',
-      outbound: buildItinerary(f.route, 0, f.duration.departure),
-      inbound:  hasReturn ? buildItinerary(f.route, 1, f.duration.return) : null,
-      deepLink: f.deep_link,
-    }
-  })
+      airline:  f.airline ?? 'Compagnie inconnue',
+      source:   f.source ?? 'scraper',
+      outbound: buildItinerary(f, false),
+      inbound:  hasReturn ? buildItinerary(f, true) : null,
+      deepLink: `https://www.kayak.fr/flights/${input.origin}-${input.destination}/${input.departureDate}${input.returnDate ? '/'+input.returnDate : ''}?sort=price_a`,
+    })
+  }
 
   return ok({ flights, total: flights.length })
 })

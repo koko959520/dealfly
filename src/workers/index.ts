@@ -5,6 +5,7 @@ import { SerpApiCollector } from '@/src/collectors/serpapi.collector'
 import { SkyScrapperCollector } from '@/src/collectors/skyscrapper.collector'
 import { AviationstackCollector } from '@/src/collectors/aviationstack.collector'
 import { KiwiCollector } from '@/src/collectors/kiwi.collector'
+import { KayakCollector } from '@/src/collectors/kayak.collector'
 import { normalizeAndStore } from '@/src/collectors/normalizer'
 import { detectDeals } from '@/src/engine/deal-detector'
 
@@ -39,6 +40,18 @@ const collectWorker = new Worker(
         } catch (err) {
           logger.error({ err, origin, collector: collector.constructor.name }, 'Collector error — skipping')
         }
+      }
+    }
+
+    // Kayak scraper — tourne séparément (Playwright lourd)
+    const kayak = new KayakCollector()
+    for (const origin of ORIGINS) {
+      try {
+        const offers   = await kayak.collect(origin, DESTINATIONS)
+        const inserted = await normalizeAndStore(offers)
+        totalInserted += inserted
+      } catch (err) {
+        logger.error({ err, origin }, 'Kayak collector error — skipping')
       }
     }
 
