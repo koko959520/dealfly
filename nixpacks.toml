@@ -1,10 +1,5 @@
 [phases.build]
-cmds = [
-  "npm ci",
-  "npm run build",
-  "cp -r .next/static .next/standalone/.next/static",
-  "cp -r public .next/standalone/public"
-]
+cmds = ["npm ci", "npm run build"]
 
 [start]
-cmd = "node .next/standalone/server.js"
+cmd = "npm run start:prod"
