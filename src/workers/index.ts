@@ -6,6 +6,8 @@ import { SkyScrapperCollector } from '@/src/collectors/skyscrapper.collector'
 import { AviationstackCollector } from '@/src/collectors/aviationstack.collector'
 import { KiwiCollector } from '@/src/collectors/kiwi.collector'
 import { KayakCollector } from '@/src/collectors/kayak.collector'
+import { OpodoCollector } from '@/src/collectors/opodo.collector'
+import { GoVoyagesCollector } from '@/src/collectors/govoyages.collector'
 import { normalizeAndStore } from '@/src/collectors/normalizer'
 import { detectDeals } from '@/src/engine/deal-detector'
 
@@ -43,15 +45,22 @@ const collectWorker = new Worker(
       }
     }
 
-    // Kayak scraper — tourne séparément (Playwright lourd)
-    const kayak = new KayakCollector()
-    for (const origin of ORIGINS) {
-      try {
-        const offers   = await kayak.collect(origin, DESTINATIONS)
-        const inserted = await normalizeAndStore(offers)
-        totalInserted += inserted
-      } catch (err) {
-        logger.error({ err, origin }, 'Kayak collector error — skipping')
+    // Scrapers Playwright — tournent séquentiellement (lourd en mémoire)
+    const scrapers = [
+      new KayakCollector(),
+      new OpodoCollector(),
+      new GoVoyagesCollector(),
+    ]
+    for (const scraper of scrapers) {
+      for (const origin of ORIGINS) {
+        try {
+          const offers   = await scraper.collect(origin, DESTINATIONS)
+          const inserted = await normalizeAndStore(offers)
+          totalInserted += inserted
+          logger.info({ scraper: scraper.name, origin, inserted }, 'Scraper cycle done')
+        } catch (err) {
+          logger.error({ err, origin, scraper: scraper.name }, 'Scraper error — skipping')
+        }
       }
     }
 
