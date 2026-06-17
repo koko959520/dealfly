@@ -10,6 +10,7 @@ import { OpodoCollector } from '@/src/collectors/opodo.collector'
 import { GoVoyagesCollector } from '@/src/collectors/govoyages.collector'
 import { normalizeAndStore } from '@/src/collectors/normalizer'
 import { detectDeals } from '@/src/engine/deal-detector'
+import { runDailyDealsAlert } from '@/src/scripts/daily-deals-alert'
 
 const ORIGINS      = ['CDG', 'ORY', 'LYS']
 const DESTINATIONS = ['JFK', 'BKK', 'DXB', 'LAX', 'NRT', 'GRU', 'CMN', 'DKR', 'IST', 'BCN']
@@ -80,12 +81,27 @@ const detectWorker = new Worker(
   { connection, concurrency: 1 },
 )
 
+export const alertQueue = new Queue('alert', { connection })
+
+const alertWorker = new Worker(
+  'alert',
+  async (_job: Job) => {
+    await runDailyDealsAlert()
+  },
+  { connection, concurrency: 1 },
+)
+
 async function scheduleJobs() {
   await collectQueue.add('collect', {}, {
     repeat: { pattern: '0 */6 * * *' },
     jobId:  'collect-cron',
   })
-  logger.info('Workers started — collect cron: every 6h')
+  // Alerte email chaque jour à 7h (heure Paris)
+  await alertQueue.add('daily-alert', {}, {
+    repeat: { pattern: '0 7 * * *' },
+    jobId:  'alert-cron',
+  })
+  logger.info('Workers started — collect cron: every 6h | alert cron: daily 7h')
 }
 
 scheduleJobs().catch(logger.error.bind(logger))
@@ -93,5 +109,6 @@ scheduleJobs().catch(logger.error.bind(logger))
 process.on('SIGTERM', async () => {
   await collectWorker.close()
   await detectWorker.close()
+  await alertWorker.close()
   process.exit(0)
 })
