@@ -1,6 +1,7 @@
 /**
- * Cherche les vols les moins chers sur 90 jours et envoie un email de résumé.
- * Lancé chaque nuit par le worker BullMQ (cron 0 7 * * *).
+ * Détecte les vols à -40% ou plus vs le prix médian de la route,
+ * et envoie un email avec max 4 deals.
+ * Cron : lundi, mercredi, vendredi à 8h (0 8 * * 1,3,5)
  */
 
 import axios from 'axios'
@@ -11,6 +12,9 @@ const RAPIDAPI_KEY  = process.env.RAPIDAPI_KEY ?? process.env.SKYSCANNER_RAPIDAP
 const RAPIDAPI_HOST = 'sky-scrapper.p.rapidapi.com'
 const ALERT_EMAIL   = process.env.DEALS_ALERT_EMAIL ?? 'bamba.kramoko95@gmail.com'
 const BASE_URL      = process.env.NEXT_PUBLIC_BASE_URL ?? 'https://dealfly-production.up.railway.app'
+
+// Seuil : on n'envoie que les vols >= 40% moins chers que la médiane de la route
+const DEAL_THRESHOLD = 0.40
 
 const ORIGINS = ['CDG', 'ORY', 'LYS']
 const DESTINATIONS = [
@@ -28,17 +32,21 @@ const DESTINATIONS = [
 
 const DURATIONS_DAYS = [7, 10, 14]
 
-interface Deal {
-  origin:      string
-  destination: string
-  destName:    string
-  departDate:  string
-  returnDate:  string
-  price:       number
-  airline:     string
-  stops:       number
-  duration:    string
-  deepLink:    string
+interface RawFlight {
+  origin:     string
+  dest:       string
+  destName:   string
+  depDate:    string
+  retDate:    string
+  price:      number
+  airline:    string
+  stops:      number
+  deepLink:   string
+}
+
+interface Deal extends RawFlight {
+  medianPrice: number
+  discount:    number  // ex: 0.47 = -47%
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -51,6 +59,13 @@ function addDays(date: Date, n: number): Date {
 
 function fmt(date: Date): string {
   return date.toISOString().slice(0, 10)
+}
+
+function median(arr: number[]): number {
+  if (!arr.length) return 0
+  const sorted = [...arr].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
 }
 
 async function getEntityId(iata: string): Promise<string | null> {
@@ -70,47 +85,35 @@ async function getEntityId(iata: string): Promise<string | null> {
   }
 }
 
-async function searchFlights(
-  origin: string, originEntityId: string,
-  dest:   string, destEntityId:   string,
+async function fetchFlights(
+  origin: string, oEid: string,
+  dest:   string, dEid: string,
   depDate: string, retDate: string,
-): Promise<Deal[]> {
+): Promise<RawFlight[]> {
   try {
     const res = await axios.get(`https://${RAPIDAPI_HOST}/api/v2/flights/searchFlights`, {
       params: {
-        originSkyId:         origin,
-        destinationSkyId:    dest,
-        originEntityId,
-        destinationEntityId: destEntityId,
-        date:                depDate,
-        returnDate:          retDate,
-        cabinClass:          'economy',
-        adults:              1,
-        currency:            'EUR',
-        market:              'FR',
-        countryCode:         'FR',
-        locale:              'fr-FR',
-        sortBy:              'best',
+        originSkyId: origin, destinationSkyId: dest,
+        originEntityId: oEid, destinationEntityId: dEid,
+        date: depDate, returnDate: retDate,
+        cabinClass: 'economy', adults: 1,
+        currency: 'EUR', market: 'FR', countryCode: 'FR', locale: 'fr-FR',
+        sortBy: 'best',
       },
       headers: { 'x-rapidapi-key': RAPIDAPI_KEY, 'x-rapidapi-host': RAPIDAPI_HOST },
       timeout: 20000,
     })
     const itineraries = res.data?.data?.itineraries ?? []
-    return itineraries.slice(0, 3).map((it: any) => {
-      const leg      = it.legs[0]
-      const airline  = leg.carriers?.marketing?.[0]?.name ?? '?'
-      const stops    = Math.max(0, (leg.segments?.length ?? 1) - 1)
-      const duration = (() => {
-        const m = leg.durationInMinutes ?? 0
-        return m > 0 ? `${Math.floor(m/60)}h${m%60 > 0 ? m%60+'m' : ''}` : '?'
-      })()
+    return itineraries.slice(0, 5).map((it: any) => {
+      const leg     = it.legs[0]
+      const airline = leg.carriers?.marketing?.[0]?.name ?? '?'
+      const stops   = Math.max(0, (leg.segments?.length ?? 1) - 1)
       const deepLink = it.deeplink ?? `https://www.skyscanner.fr/transport/vols/${origin.toLowerCase()}/${dest.toLowerCase()}/${depDate.replace(/-/g,'')}/${retDate.replace(/-/g,'')}`
       return {
-        origin, destination: dest,
-        destName: DESTINATIONS.find(d => d.code === dest)?.name ?? dest,
-        departDate: depDate, returnDate: retDate,
-        price:    Math.round(it.price.raw),
-        airline, stops, duration, deepLink,
+        origin, dest, destName: DESTINATIONS.find(d => d.code === dest)?.name ?? dest,
+        depDate, retDate,
+        price: Math.round(it.price.raw),
+        airline, stops, deepLink,
       }
     })
   } catch {
@@ -120,55 +123,58 @@ async function searchFlights(
 
 // ── Email HTML ────────────────────────────────────────────────────────────────
 
-function buildHtml(deals: Deal[], scannedAt: string): string {
-  const rows = deals.map((d, i) => `
-    <tr style="background:${i % 2 === 0 ? '#ffffff' : '#f9f9f9'}">
-      <td style="padding:12px 16px;font-weight:600">${d.origin} → ${d.destination}</td>
-      <td style="padding:12px 16px">${d.destName}</td>
-      <td style="padding:12px 16px">${d.departDate}</td>
-      <td style="padding:12px 16px">${d.returnDate}</td>
-      <td style="padding:12px 16px">${d.airline}</td>
-      <td style="padding:12px 16px">${d.stops === 0 ? '✈️ Direct' : `${d.stops} escale${d.stops > 1 ? 's' : ''}`}</td>
-      <td style="padding:12px 16px;font-size:20px;font-weight:700;color:#2563EB">${d.price}€</td>
-      <td style="padding:12px 16px"><a href="${d.deepLink}" style="background:#2563EB;color:#fff;padding:8px 16px;border-radius:6px;text-decoration:none;font-weight:600">Voir →</a></td>
-    </tr>
+function buildHtml(deals: Deal[]): string {
+  const cards = deals.map(d => `
+    <div style="border:2px solid #2563EB;border-radius:12px;padding:20px 24px;margin-bottom:20px;background:#fff">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
+        <div>
+          <div style="font-size:22px;font-weight:800;color:#111">${d.origin} → ${d.dest} <span style="color:#6b7280;font-weight:500;font-size:16px">(${d.destName})</span></div>
+          <div style="margin-top:6px;color:#374151;font-size:15px">
+            ✈️ ${d.airline} · ${d.stops === 0 ? 'Direct' : `${d.stops} escale${d.stops > 1 ? 's' : ''}`}
+          </div>
+          <div style="margin-top:4px;color:#6b7280;font-size:14px">
+            📅 ${d.depDate} → ${d.retDate}
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:32px;font-weight:900;color:#2563EB">${d.price}€</div>
+          <div style="background:#dc2626;color:#fff;padding:4px 10px;border-radius:20px;font-size:13px;font-weight:700;display:inline-block;margin-top:4px">
+            -${Math.round(d.discount * 100)}% vs prix normal
+          </div>
+          <div style="color:#9ca3af;font-size:12px;margin-top:4px;text-decoration:line-through">${Math.round(d.medianPrice)}€ habituellement</div>
+        </div>
+      </div>
+      <div style="margin-top:16px">
+        <a href="${d.deepLink}" style="background:#2563EB;color:#fff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;display:inline-block">
+          Réserver maintenant →
+        </a>
+      </div>
+    </div>
   `).join('')
+
+  const bestDeal = deals[0]
+  const subject  = `✈️ ${deals.length} deal${deals.length > 1 ? 's' : ''} dingue${deals.length > 1 ? 's' : ''} — dès ${bestDeal.price}€ (-${Math.round(bestDeal.discount * 100)}%)`
 
   return `
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>DealFly — Alertes vols</title></head>
+<head><meta charset="utf-8"></head>
 <body style="font-family:Arial,sans-serif;margin:0;padding:0;background:#f3f4f6">
-  <div style="max-width:900px;margin:32px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1)">
-    <div style="background:#2563EB;padding:32px;text-align:center">
-      <h1 style="color:#fff;margin:0;font-size:28px">✈️ DealFly — Top ${deals.length} deals du jour</h1>
-      <p style="color:#bfdbfe;margin:8px 0 0">Scan du ${scannedAt} · 90 jours à venir · toutes origines</p>
+  <div style="max-width:640px;margin:32px auto;background:#f3f4f6">
+    <div style="background:#111827;padding:28px 32px;border-radius:12px 12px 0 0;text-align:center">
+      <div style="font-size:28px;font-weight:900;color:#fff">✈️ DealFly</div>
+      <div style="color:#9ca3af;margin-top:4px;font-size:15px">${deals.length} deal${deals.length > 1 ? 's' : ''} détecté${deals.length > 1 ? 's' : ''} à -${Math.round(bestDeal.discount * 100)}% ou plus</div>
     </div>
-    <div style="padding:24px">
-      <p style="color:#374151">Voici les <strong>prix les plus bas</strong> trouvés parmi 3 aéroports de départ, 10 destinations et 90 jours :</p>
-      <div style="overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:14px">
-          <thead>
-            <tr style="background:#1e40af;color:#fff">
-              <th style="padding:10px 16px;text-align:left">Trajet</th>
-              <th style="padding:10px 16px;text-align:left">Destination</th>
-              <th style="padding:10px 16px;text-align:left">Départ</th>
-              <th style="padding:10px 16px;text-align:left">Retour</th>
-              <th style="padding:10px 16px;text-align:left">Compagnie</th>
-              <th style="padding:10px 16px;text-align:left">Escales</th>
-              <th style="padding:10px 16px;text-align:left">Prix</th>
-              <th style="padding:10px 16px;text-align:left">Lien</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-      <p style="margin-top:24px;color:#6b7280;font-size:13px">
-        Prix en économique, 1 adulte. Les tarifs peuvent varier. Cliquez "Voir →" pour réserver directement sur Skyscanner.
+    <div style="background:#fff;padding:28px 32px;border-radius:0 0 12px 12px">
+      <p style="color:#374151;margin:0 0 20px;font-size:15px">
+        Notre radar a détecté des prix <strong>anormalement bas</strong> sur ces vols — ça ne dure jamais longtemps.
       </p>
-    </div>
-    <div style="background:#f9fafb;padding:16px 24px;text-align:center;border-top:1px solid #e5e7eb">
-      <a href="${BASE_URL}/search" style="color:#2563EB;text-decoration:none;font-size:14px">Rechercher un vol sur DealFly</a>
+      ${cards}
+      <div style="margin-top:24px;padding-top:20px;border-top:1px solid #e5e7eb;text-align:center">
+        <a href="${BASE_URL}/search" style="color:#2563EB;text-decoration:none;font-size:13px">
+          Chercher d'autres vols sur DealFly
+        </a>
+      </div>
     </div>
   </div>
 </body>
@@ -179,79 +185,98 @@ function buildHtml(deals: Deal[], scannedAt: string): string {
 
 export async function runDailyDealsAlert(): Promise<void> {
   if (!RAPIDAPI_KEY) {
-    logger.warn('RAPIDAPI_KEY manquant — skip daily deals alert')
+    logger.warn('RAPIDAPI_KEY manquant — skip deals alert')
+    return
+  }
+  if (!process.env.RESEND_API_KEY) {
+    logger.warn('RESEND_API_KEY manquant — skip deals alert')
     return
   }
 
-  const resendKey = process.env.RESEND_API_KEY
-  if (!resendKey) {
-    logger.warn('RESEND_API_KEY manquant — skip daily deals alert')
-    return
+  logger.info('Deals alert: scan en cours...')
+
+  const today = new Date()
+
+  // Cache entityIds
+  const cache = new Map<string, string | null>()
+  const eid = async (iata: string) => {
+    if (!cache.has(iata)) cache.set(iata, await getEntityId(iata))
+    return cache.get(iata)!
   }
 
-  logger.info('Daily deals alert: démarrage du scan...')
+  // Collecte TOUTES les dates pour calculer la médiane par route
+  // routePrices[`${origin}-${dest}-${duration}`] = [price1, price2, ...]
+  const routePrices = new Map<string, number[]>()
+  const allFlights:  Array<{ key: string; flight: RawFlight }> = []
 
-  const today    = new Date()
-  const allDeals: Deal[] = []
-
-  // Cache entityIds pour éviter de les re-fetcher
-  const entityCache = new Map<string, string | null>()
-  async function cachedEntityId(iata: string) {
-    if (!entityCache.has(iata)) entityCache.set(iata, await getEntityId(iata))
-    return entityCache.get(iata)!
-  }
-
-  // Scan : toutes les 2 semaines sur 90 jours pour chaque trajet/durée
   for (const origin of ORIGINS) {
-    const originEntityId = await cachedEntityId(origin)
-    if (!originEntityId) continue
+    const oEid = await eid(origin)
+    if (!oEid) continue
 
     for (const dest of DESTINATIONS) {
-      const destEntityId = await cachedEntityId(dest.code)
-      if (!destEntityId) continue
+      const dEid = await eid(dest.code)
+      if (!dEid) continue
 
       for (const duration of DURATIONS_DAYS) {
-        // Dates de départ : tous les 14 jours sur 90 jours
+        const key = `${origin}-${dest.code}-${duration}`
+
         for (let daysOut = 14; daysOut <= 90; daysOut += 14) {
           const depDate = fmt(addDays(today, daysOut))
           const retDate = fmt(addDays(today, daysOut + duration))
 
-          const results = await searchFlights(
-            origin, originEntityId,
-            dest.code, destEntityId,
-            depDate, retDate,
-          )
-          allDeals.push(...results)
+          const results = await fetchFlights(origin, oEid, dest.code, dEid, depDate, retDate)
 
-          // Pause pour ne pas dépasser le rate limit RapidAPI (10 req/s)
-          await new Promise(r => setTimeout(r, 200))
+          for (const f of results) {
+            if (!routePrices.has(key)) routePrices.set(key, [])
+            routePrices.get(key)!.push(f.price)
+            allFlights.push({ key, flight: f })
+          }
+
+          await new Promise(r => setTimeout(r, 300))
         }
       }
     }
   }
 
-  if (allDeals.length === 0) {
-    logger.warn('Daily deals alert: aucun résultat trouvé')
+  logger.info({ routes: routePrices.size, flights: allFlights.length }, 'Scan terminé')
+
+  // Détecter les deals à -40% ou plus
+  const deals: Deal[] = []
+
+  for (const { key, flight } of allFlights) {
+    const prices = routePrices.get(key) ?? []
+    if (prices.length < 2) continue // pas assez de données pour comparer
+
+    const med      = median(prices)
+    const discount = (med - flight.price) / med
+
+    if (discount >= DEAL_THRESHOLD) {
+      deals.push({ ...flight, medianPrice: med, discount })
+    }
+  }
+
+  if (deals.length === 0) {
+    logger.info('Aucun deal à -40% détecté cette fois — pas d\'email envoyé')
     return
   }
 
-  // Top 15 par prix
-  const top = allDeals
-    .sort((a, b) => a.price - b.price)
-    .slice(0, 15)
+  // Top 4 deals, triés par % de réduction
+  const top4 = deals
+    .sort((a, b) => b.discount - a.discount)
+    .slice(0, 4)
 
-  logger.info({ total: allDeals.length, top: top.length }, 'Daily deals alert: résultats collectés')
+  logger.info({ deals: top4.length, best: top4[0].discount }, 'Deals trouvés, envoi email...')
 
-  const scannedAt = today.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
-  const html = buildHtml(top, scannedAt)
+  const html    = buildHtml(top4)
+  const subject = `✈️ ${top4.length} deal${top4.length > 1 ? 's' : ''} dingue${top4.length > 1 ? 's' : ''} — dès ${top4[0].price}€ (-${Math.round(top4[0].discount * 100)}%)`
 
-  const resend = new Resend(resendKey)
+  const resend = new Resend(process.env.RESEND_API_KEY)
   await resend.emails.send({
-    from:    'DealFly Alerts <deals@dealfly-production.up.railway.app>',
+    from:    'DealFly <onboarding@resend.dev>',
     to:      ALERT_EMAIL,
-    subject: `✈️ Top ${top.length} vols pas chers — à partir de ${top[0].price}€ (${scannedAt})`,
+    subject,
     html,
   })
 
-  logger.info({ to: ALERT_EMAIL, dealsCount: top.length }, 'Daily deals alert: email envoyé ✅')
+  logger.info({ to: ALERT_EMAIL }, 'Email deals envoyé ✅')
 }

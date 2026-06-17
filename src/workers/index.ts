@@ -96,12 +96,12 @@ async function scheduleJobs() {
     repeat: { pattern: '0 */6 * * *' },
     jobId:  'collect-cron',
   })
-  // Alerte email chaque jour à 7h (heure Paris)
+  // Alerte deals : lundi, mercredi, vendredi à 8h — uniquement si -40% ou plus
   await alertQueue.add('daily-alert', {}, {
-    repeat: { pattern: '0 7 * * *' },
+    repeat: { pattern: '0 8 * * 1,3,5' },
     jobId:  'alert-cron',
   })
-  logger.info('Workers started — collect cron: every 6h | alert cron: daily 7h')
+  logger.info('Workers started — collect cron: every 6h | alert cron: Mon/Wed/Fri 8h')
 }
 
 scheduleJobs().catch(logger.error.bind(logger))
