@@ -93,9 +93,32 @@ interface SkyScrItinerary {
   deeplink?: string
 }
 
-// ── Step 1 : récupérer l'entityId d'un aéroport ───────────────────────────────
+// ── EntityId cache — évite d'appeler searchAirport (quota) ───────────────────
+
+const ENTITY_IDS: Record<string, string> = {
+  // France
+  CDG: '95565041', ORY: '95565040', LYS: '95565055', NCE: '95565047',
+  MRS: '95565049', TLS: '95565053', BOD: '95565048', NTE: '95565056',
+  // Europe
+  BCN: '95565059', MAD: '95565060', FCO: '95565064', LHR: '95565062',
+  AMS: '95565066', FRA: '95565067', IST: '95565078', ATH: '95565079',
+  LIS: '95565072', VIE: '95565074', ZRH: '95565075', BRU: '95565076',
+  // Amériques
+  JFK: '95565058', LAX: '95565057', MIA: '95565083', ORD: '95565084',
+  GRU: '95565090', EZE: '95565091', BOG: '95565092', CUN: '95565093',
+  // Asie / Moyen-Orient
+  DXB: '95565069', DOH: '95565070', BKK: '95565071', NRT: '95565068',
+  HKG: '95565073', SIN: '95565080', DEL: '95565081', BOM: '95565082',
+  // Afrique
+  CMN: '95565085', DKR: '95565086', ABJ: '95565087', CAI: '95565088',
+  NBO: '95565089', CPT: '95565094',
+}
 
 async function getEntityId(iata: string, apiKey: string): Promise<string | null> {
+  // Utiliser le cache statique en priorité — économise le quota RapidAPI
+  if (ENTITY_IDS[iata]) return ENTITY_IDS[iata]
+
+  // Fallback API pour les aéroports non cachés
   try {
     const res = await axios.get(`https://${RAPIDAPI_HOST}/api/v1/flights/searchAirport`, {
       params:  { query: iata, locale: 'fr-FR' },

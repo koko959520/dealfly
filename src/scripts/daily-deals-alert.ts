@@ -68,7 +68,16 @@ function median(arr: number[]): number {
   return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
 }
 
+const ENTITY_IDS: Record<string, string> = {
+  CDG: '95565041', ORY: '95565040', LYS: '95565055', NCE: '95565047',
+  BCN: '95565059', MAD: '95565060', FCO: '95565064', LHR: '95565062',
+  JFK: '95565058', LAX: '95565057', GRU: '95565090', EZE: '95565091',
+  DXB: '95565069', DOH: '95565070', BKK: '95565071', NRT: '95565068',
+  CMN: '95565085', DKR: '95565086', IST: '95565078', SIN: '95565080',
+}
+
 async function getEntityId(iata: string): Promise<string | null> {
+  if (ENTITY_IDS[iata]) return ENTITY_IDS[iata]
   try {
     const res = await axios.get(`https://${RAPIDAPI_HOST}/api/v1/flights/searchAirport`, {
       params:  { query: iata, locale: 'fr-FR' },
