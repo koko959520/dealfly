@@ -102,11 +102,12 @@ async function getEntityId(iata: string, apiKey: string): Promise<string | null>
       headers: { 'x-rapidapi-key': apiKey, 'x-rapidapi-host': RAPIDAPI_HOST },
       timeout: 8000,
     })
-    const places: Array<{ skyId: string; entityId: string; presentation: { title: string } }> =
+    const places: Array<{ navigation: { entityId: string; relevantFlightParams?: { skyId: string; entityId: string } } }> =
       res.data?.data ?? []
-    // Prendre le premier résultat dont le skyId correspond exactement
-    const match = places.find((p) => p.skyId?.toUpperCase() === iata) ?? places[0]
-    return match?.entityId ?? null
+    const match =
+      places.find((p) => p.navigation?.relevantFlightParams?.skyId?.toUpperCase() === iata)
+      ?? places[0]
+    return match?.navigation?.relevantFlightParams?.entityId ?? match?.navigation?.entityId ?? null
   } catch {
     return null
   }
