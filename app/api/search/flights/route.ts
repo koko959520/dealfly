@@ -1,7 +1,6 @@
 import { z } from 'zod'
-import { addDays, format } from 'date-fns'
+import axios from 'axios'
 import { ok, err, withErrorHandler, getParams } from '@/src/lib/api'
-import { db, Collections, toTS, type FlightDoc } from '@/src/lib/firestore'
 
 const Schema = z.object({
   origin:        z.string().length(3).toUpperCase(),
@@ -16,7 +15,6 @@ export interface FlightResult {
   price:    number
   currency: string
   airline:  string
-  source:   string
   outbound: Itinerary
   inbound:  Itinerary | null
   deepLink: string
@@ -38,32 +36,88 @@ export interface Segment {
   duration:  string
 }
 
-function buildItinerary(flight: FlightDoc, isReturn: boolean): Itinerary {
-  // Les données Firestore ne stockent pas les segments détaillés —
-  // on construit un segment unique depuis les champs disponibles
-  const depDate = isReturn && flight.returnDate
-    ? format(flight.returnDate.toDate(), "yyyy-MM-dd'T'HH:mm:ss")
-    : format(flight.departureDate.toDate(), "yyyy-MM-dd'T'HH:mm:ss")
+const RAPIDAPI_HOST = 'sky-scrapper.p.rapidapi.com'
 
-  const from = isReturn ? flight.destination : flight.origin
-  const to   = isReturn ? flight.origin      : flight.destination
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
+function minsToHm(mins: number): string {
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  return m > 0 ? `${h}h${m}m` : `${h}h`
+}
+
+function buildItinerary(leg: SkyScrLeg): Itinerary {
+  const durationMins = leg.durationInMinutes ?? 0
   return {
-    duration: '—',
-    stops:    0,
-    segments: [{
-      airline:   flight.airline ?? '?',
-      flightNum: '',
-      from,
-      to,
-      departure: depDate,
-      arrival:   depDate,
-      duration:  '—',
-    }],
+    duration: minsToHm(durationMins),
+    stops:    Math.max(0, (leg.segments?.length ?? 1) - 1),
+    segments: (leg.segments ?? []).map((s) => ({
+      airline:   s.marketingCarrier?.name ?? s.operatingCarrier?.name ?? '?',
+      flightNum: `${s.marketingCarrier?.alternateId ?? ''}${s.flightNumber ?? ''}`,
+      from:      s.origin?.displayCode ?? leg.origin?.displayCode ?? '?',
+      to:        s.destination?.displayCode ?? leg.destination?.displayCode ?? '?',
+      departure: s.departure ?? leg.departure,
+      arrival:   s.arrival ?? leg.arrival,
+      duration:  minsToHm(s.durationInMinutes ?? 0),
+    })),
   }
 }
 
+// ── Types Sky Scrapper ────────────────────────────────────────────────────────
+
+interface SkyScrSegment {
+  departure:         string
+  arrival:           string
+  durationInMinutes: number
+  flightNumber:      string
+  marketingCarrier:  { name: string; alternateId: string } | null
+  operatingCarrier:  { name: string } | null
+  origin:            { displayCode: string } | null
+  destination:       { displayCode: string } | null
+}
+
+interface SkyScrLeg {
+  departure:         string
+  arrival:           string
+  durationInMinutes: number
+  origin:            { displayCode: string; name: string }
+  destination:       { displayCode: string; name: string }
+  carriers:          { marketing: Array<{ name: string; alternateId: string }> }
+  segments:          SkyScrSegment[]
+}
+
+interface SkyScrItinerary {
+  id:    string
+  price: { raw: number; formatted: string }
+  legs:  SkyScrLeg[]
+  deeplink?: string
+}
+
+// ── Step 1 : récupérer l'entityId d'un aéroport ───────────────────────────────
+
+async function getEntityId(iata: string, apiKey: string): Promise<string | null> {
+  try {
+    const res = await axios.get(`https://${RAPIDAPI_HOST}/api/v1/flights/searchAirport`, {
+      params:  { query: iata, locale: 'fr-FR' },
+      headers: { 'x-rapidapi-key': apiKey, 'x-rapidapi-host': RAPIDAPI_HOST },
+      timeout: 8000,
+    })
+    const places: Array<{ skyId: string; entityId: string; presentation: { title: string } }> =
+      res.data?.data ?? []
+    // Prendre le premier résultat dont le skyId correspond exactement
+    const match = places.find((p) => p.skyId?.toUpperCase() === iata) ?? places[0]
+    return match?.entityId ?? null
+  } catch {
+    return null
+  }
+}
+
+// ── Handler ───────────────────────────────────────────────────────────────────
+
 export const GET = withErrorHandler(async (req) => {
+  const apiKey = process.env.RAPIDAPI_KEY ?? process.env.SKYSCANNER_RAPIDAPI_KEY
+  if (!apiKey) return err('RAPIDAPI_KEY non configuré', 503)
+
   const params = getParams(req)
   const input  = Schema.parse({
     origin:        params.get('origin'),
@@ -73,54 +127,53 @@ export const GET = withErrorHandler(async (req) => {
     adults:        params.get('adults') ?? '1',
   })
 
-  // Fenêtre ±2 jours autour de la date demandée
-  const depDate  = new Date(input.departureDate)
-  const depStart = addDays(depDate, -2)
-  const depEnd   = addDays(depDate, 2)
+  // Récupérer les entityIds en parallèle
+  const [originEntityId, destEntityId] = await Promise.all([
+    getEntityId(input.origin, apiKey),
+    getEntityId(input.destination, apiKey),
+  ])
 
-  const snap = await db
-    .collection(Collections.FLIGHTS)
-    .where('origin',        '==', input.origin)
-    .where('destination',   '==', input.destination)
-    .where('departureDate', '>=', toTS(depStart))
-    .where('departureDate', '<=', toTS(depEnd))
-    .orderBy('departureDate')
-    .orderBy('priceEur')
-    .limit(50)
-    .get()
-
-  if (snap.empty) {
-    return ok({
-      flights: [],
-      total:   0,
-      message: 'Aucun vol en base pour cette route et cette date. Le scraper collecte des données toutes les 6h.',
-    })
+  if (!originEntityId || !destEntityId) {
+    return err(`Aéroport introuvable : ${!originEntityId ? input.origin : input.destination}`, 400)
   }
 
-  // Dédupliquer par (date + prix + compagnie) et ajuster par nb passagers
-  const seen = new Set<string>()
-  const flights: FlightResult[] = []
+  const searchParams: Record<string, string | number> = {
+    originSkyId:           input.origin,
+    destinationSkyId:      input.destination,
+    originEntityId,
+    destinationEntityId:   destEntityId,
+    date:                  input.departureDate,
+    cabinClass:            'economy',
+    adults:                input.adults,
+    currency:              'EUR',
+    market:                'FR',
+    countryCode:           'FR',
+    locale:                'fr-FR',
+    sortBy:                'best',
+  }
+  if (input.returnDate) searchParams.returnDate = input.returnDate
 
-  for (const doc of snap.docs) {
-    const f   = doc.data() as FlightDoc
-    const key = `${f.departureDate.toDate().toDateString()}-${f.priceEur}-${f.airline}`
-    if (seen.has(key)) continue
-    seen.add(key)
+  const response = await axios.get(`https://${RAPIDAPI_HOST}/api/v2/flights/searchFlights`, {
+    params:  searchParams,
+    headers: { 'x-rapidapi-key': apiKey, 'x-rapidapi-host': RAPIDAPI_HOST },
+    timeout: 20000,
+  })
 
-    const unitPrice = Math.round(f.priceEur * input.adults)
-    const hasReturn = !!f.returnDate && !!input.returnDate
+  const itineraries: SkyScrItinerary[] = response.data?.data?.itineraries ?? []
 
-    flights.push({
-      id:       doc.id,
-      price:    unitPrice,
+  const flights: FlightResult[] = itineraries.slice(0, 20).map((it) => {
+    const outLeg = it.legs[0]
+    const inLeg  = it.legs[1] ?? null
+    return {
+      id:       it.id,
+      price:    Math.round(it.price.raw),
       currency: 'EUR',
-      airline:  f.airline ?? 'Compagnie inconnue',
-      source:   f.source ?? 'scraper',
-      outbound: buildItinerary(f, false),
-      inbound:  hasReturn ? buildItinerary(f, true) : null,
-      deepLink: `https://www.kayak.fr/flights/${input.origin}-${input.destination}/${input.departureDate}${input.returnDate ? '/'+input.returnDate : ''}?sort=price_a`,
-    })
-  }
+      airline:  outLeg.carriers?.marketing?.[0]?.name ?? '?',
+      outbound: buildItinerary(outLeg),
+      inbound:  inLeg ? buildItinerary(inLeg) : null,
+      deepLink: it.deeplink ?? `https://www.skyscanner.fr/transport/vols/${input.origin.toLowerCase()}/${input.destination.toLowerCase()}/${input.departureDate.replace(/-/g, '')}/${input.returnDate?.replace(/-/g, '') ?? ''}`,
+    }
+  })
 
   return ok({ flights, total: flights.length })
 })
